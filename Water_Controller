@@ -1,0 +1,216 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+IPAddress    apIP(42, 42, 42, 42);  // Defining a static IP address: local & gateway
+                                    // Default IP in AP mode is 192.168.4.1
+
+/* This are the WiFi access point settings. Update them to your likin */
+const char *ssid = "WaterController1";
+const char *password = "Water@Cont1";
+
+// Define a web server at port 80 for HTTP
+ESP8266WebServer server(80);
+
+const int ledPin          = D6; // an LED is connected to NodeMCU pin D1 (ESP8266 GPIO5) via a 1K Ohm resistor
+const int waterSensorPin  = D5;
+const int WaitMillis      = 1000*60*20;
+
+bool waterState       = false;
+long waterFullMillis  = 1;
+bool ledState         = false;
+bool probing          = true;
+bool valve_override   = false;
+
+void water_controller() {
+  if(valve_override)
+    return;
+    
+  int nowMillis = millis();
+  
+  if( !probing && ((nowMillis - waterFullMillis) > WaitMillis))
+  {
+    int water = digitalRead(waterSensorPin);
+    if(!water)
+    {
+      Serial.println("Starting Probing...");
+      probing = true;
+      digitalWrite (ledPin, false);
+    }
+  }
+  
+  if(probing)
+  {
+    waterState = digitalRead(waterSensorPin);
+    if(waterState)
+    {
+      waterFullMillis = millis();
+      probing = false;
+      digitalWrite (ledPin, true);
+      Serial.println("Water Full...");
+    }
+  }
+}
+
+void handleRoot() {
+  
+  char ledText[80];
+  char overrideText[80];
+  char waterText[80];
+  char probingText[80];
+  char lastFullTime[80];
+    
+  digitalWrite (LED_BUILTIN, 0); //turn the built in LED on pin DO of NodeMCU on   
+  
+  if(server.arg("override").toInt() == 2) 
+  {
+    valve_override = true;
+  }else if(server.arg("override").toInt() == 1) 
+  {
+    valve_override = false;
+    probing = true;
+    water_controller();
+  }
+  
+  if (valve_override) {
+    strcpy(overrideText, "Valve in manual mode. <a href=\"/?override=1\">Turn on automatic mode!</a>");
+    strcpy(probingText, "Not monitoring Tank");
+  } else {
+    strcpy(overrideText, "Valve in automatic mode. <a href=\"/?override=2\">Turn on manual mode!</a>");
+    if (!probing) {    
+      int nowMillis = millis();
+      int min = ((WaitMillis + waterFullMillis) - nowMillis)/(1000*60);
+      int sec = (((WaitMillis + waterFullMillis) - nowMillis)/1000)%60;
+      snprintf(probingText, 80, "Waiting for %02d:%02d min before switching on valve", min, sec);
+    } else {
+      strcpy(probingText, "Wating for tank to get full.");
+    }    
+  }
+
+  /* Dynamically generate the LED toggle link, based on its current state (on or off)*/
+  if(server.arg("led").toInt() == 2) 
+  {
+    Serial.println("User switching valve on...");
+    digitalWrite (ledPin, true);
+  }else if(server.arg("led").toInt() == 1) 
+  {
+    Serial.println("User switching valve off...");
+    digitalWrite (ledPin, false);
+    probing = true;
+  }
+
+  ledState = digitalRead(ledPin);
+  waterState = digitalRead(waterSensorPin);
+
+  if (ledState) {
+    strcpy(ledText, "Valve is on. <a href=\"/?led=1\">Turn it OFF!</a>");
+  } else {
+    strcpy(ledText, "Valve is OFF. <a href=\"/?led=2\">Turn it ON!</a>");
+  }
+
+  if (waterState) {
+    strcpy(waterText, "Tank is Full");
+  } else {
+    strcpy(waterText, "Tank is not Full");
+  }
+
+  char html[1000];
+  int sec = millis() / 1000;
+  int min = sec / 60;
+  int hr = min / 60;
+
+  snprintf(lastFullTime, 80, "Last tank full: %02d hour, %02d min ago", waterFullMillis/(1000*60*60), (waterFullMillis/(1000*60))%60);
+
+// Build an HTML page to display on the web-server root address
+  snprintf ( html, 1000,
+"<html>\
+  <head>\
+    <meta http-equiv='refresh' content='10'/>\
+    <title>ESP8266 Water Controller</title>\
+    <style>\
+      body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; font-size: 1.5em; Color: #000000; }\
+      h1 { Color: #AA0000; }\
+    </style>\
+  </head>\
+  <body>\
+    <h1>Water Controller Console</h1>\
+    <p>System Uptime: %02d:%02d:%02d</p>\
+    <p>%s<p>\
+    <p>%s<p>\
+    <p>%s<p>\
+    <p>%s<p>\
+    <p>%s<p>\
+    <p>This page refreshes every 10 seconds. Click <a href=\"javascript:window.open('http://42.42.42.42','_self');\">here</a> to refresh the page now.</p>\
+  </body>\
+</html>",
+    hr, min % 60, sec % 60,
+    ledText,
+    overrideText,
+    waterText,
+    probingText,
+    lastFullTime
+  );
+  
+  server.send ( 200, "text/html", html );
+  digitalWrite ( LED_BUILTIN, 1 );
+}
+
+void handleNotFound() {
+  digitalWrite ( LED_BUILTIN, 0 );
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += ( server.method() == HTTP_GET ) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+
+  for ( uint8_t i = 0; i < server.args(); i++ ) {
+    message += " " + server.argName ( i ) + ": " + server.arg ( i ) + "\n";
+  }
+
+  server.send ( 404, "text/plain", message );
+  digitalWrite ( LED_BUILTIN, 1 ); //turn the built in LED on pin DO of NodeMCU off
+}
+
+void setup_wifi() {
+  //set-up the custom IP address
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));   // subnet FF FF FF 00  
+  
+  /* You can remove the password parameter if you want the AP to be open. */
+  WiFi.softAP(ssid, password);
+
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+ 
+  server.on ( "/", handleRoot );
+  server.on ( "/led=1", handleRoot);
+  server.on ( "/led=2", handleRoot);
+  server.on ( "/override=1", handleRoot);
+  server.on ( "/override=2", handleRoot);  
+  server.on ( "/inline", []() {
+    server.send ( 200, "text/plain", "this works as well" );
+  } );
+  server.onNotFound ( handleNotFound );
+  
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println("Configuring access point...");
+
+  pinMode ( ledPin, OUTPUT );
+  pinMode ( waterSensorPin, INPUT );
+  water_controller();  
+  setup_wifi();  
+}
+
+void loop() {
+  server.handleClient();
+  water_controller();
+}
