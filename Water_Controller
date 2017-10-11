@@ -3,49 +3,55 @@
 
 IPAddress    apIP(42, 42, 42, 42);  // Defining a static IP address: local & gateway
                                     // Default IP in AP mode is 192.168.4.1
+#define AP_URL "http://42.42.42.42/"
+#define SMALL_STR_LEN 80
 
 /* This are the WiFi access point settings. Update them to your likin */
-const char *ssid = "WaterController1";
-const char *password = "Water@Cont1";
+const char *ssid 		= "WaterController1";
+const char *password 	= "Water@Cont1";
+const bool CLOSE_VALVE 	= true;
+const bool OPEN_VALVE 	= false;
 
 // Define a web server at port 80 for HTTP
 ESP8266WebServer server(80);
 
-const int ledPin          = D6; // an LED is connected to NodeMCU pin D1 (ESP8266 GPIO5) via a 1K Ohm resistor
-const int waterSensorPin  = D5;
-const int WaitMillis      = 1000*60*20;
+const int valvePin        			= D6; // an LED is connected to NodeMCU pin D1 (ESP8266 GPIO5) via a 1K Ohm resistor
+const int waterSensorPin  			= D5;
+const int ValveWaitTimeMillis      	= 1000*60*15;
 
-bool waterState       = false;
-long waterFullMillis  = 1;
-bool ledState         = false;
-bool probing          = true;
-bool valve_override   = false;
+bool isTankFull       			= false;
+long lastTankFullTimeMillis  	= 1;
+bool valveState       			= OPEN_VALVE;
+bool monitoring       			= false;
+bool manual_mode      			= true;
 
 void water_controller() {
-  if(valve_override)
+  int isTankFull = digitalRead(waterSensorPin);
+  if(isTankFull)
+  {
+    lastTankFullTimeMillis = millis();
+  }
+  
+  if(manual_mode)
     return;
     
   int nowMillis = millis();
-  
-  if( !probing && ((nowMillis - waterFullMillis) > WaitMillis))
+  if( !monitoring && ((nowMillis - lastTankFullTimeMillis) > ValveWaitTimeMillis))
   {
-    int water = digitalRead(waterSensorPin);
-    if(!water)
+    if(!isTankFull)
     {
-      Serial.println("Starting Probing...");
-      probing = true;
-      digitalWrite (ledPin, false);
+      Serial.println("Start Monitoring the Tank for Water Level...");
+      monitoring = true;
+      digitalWrite (valvePin, OPEN_VALVE);
     }
   }
   
-  if(probing)
+  if(monitoring)
   {
-    waterState = digitalRead(waterSensorPin);
-    if(waterState)
+    if(isTankFull)
     {
-      waterFullMillis = millis();
-      probing = false;
-      digitalWrite (ledPin, true);
+      monitoring = false;
+      digitalWrite (valvePin, CLOSE_VALVE);
       Serial.println("Water Full...");
     }
   }
@@ -53,78 +59,83 @@ void water_controller() {
 
 void handleRoot() {
   
-  char ledText[80];
-  char overrideText[80];
-  char waterText[80];
-  char probingText[80];
-  char lastFullTime[80];
+  char valveText[SMALL_STR_LEN];
+  char manualText[SMALL_STR_LEN];
+  char waterText[SMALL_STR_LEN];
+  char monitoringText[SMALL_STR_LEN];
+  char lastFullTime[SMALL_STR_LEN];
+  char html[1000];
     
-  digitalWrite (LED_BUILTIN, 0); //turn the built in LED on pin DO of NodeMCU on   
+  digitalWrite (LED_BUILTIN, 0); //turn the built in LED on pin DO of NodeMCU on 
+  int nowMillis = millis();
   
-  if(server.arg("override").toInt() == 2) 
+  if(server.arg("manual_mode").toInt() == 2) 
   {
-    valve_override = true;
-  }else if(server.arg("override").toInt() == 1) 
+    manual_mode = true;
+  }else if(server.arg("manual_mode").toInt() == 1) 
   {
-    valve_override = false;
-    probing = true;
-    water_controller();
+    manual_mode = false;
+    monitoring = true;
   }
   
-  if (valve_override) {
-    strcpy(overrideText, "Valve in manual mode. <a href=\"/?override=1\">Turn on automatic mode!</a>");
-    strcpy(probingText, "Not monitoring Tank");
+  if (manual_mode) {
+    strcpy(manualText, "Valve in manual mode. <a href=\"/?manual_mode=1\">Turn on automatic mode!</a>");
+    strcpy(monitoringText, "Not monitoring Tank for Water Level");
+	
+	/* Dynamically generate the LED toggle link, based on its current state (on or off)*/
+	if(server.arg("valve").toInt() == 2) 
+	{
+	  Serial.println("User closing valve...");
+	  digitalWrite (valvePin, CLOSE_VALVE);
+	}else if(server.arg("valve").toInt() == 1) 
+	{
+	  Serial.println("User opening valve...");
+	  digitalWrite (valvePin, OPEN_VALVE);
+	}
+	
   } else {
-    strcpy(overrideText, "Valve in automatic mode. <a href=\"/?override=2\">Turn on manual mode!</a>");
-    if (!probing) {    
-      int nowMillis = millis();
-      int min = ((WaitMillis + waterFullMillis) - nowMillis)/(1000*60);
-      int sec = (((WaitMillis + waterFullMillis) - nowMillis)/1000)%60;
-      snprintf(probingText, 80, "Waiting for %02d:%02d min before switching on valve", min, sec);
+    strcpy(manualText, "Valve in automatic mode. <a href=\"/?manual_mode=2\">Turn on manual mode!</a>");
+	
+    if (!monitoring) {
+		
+      int min = ((ValveWaitTimeMillis + lastTankFullTimeMillis) - nowMillis)/(1000*60);
+      int sec = (((ValveWaitTimeMillis + lastTankFullTimeMillis) - nowMillis)/1000)%60;
+      snprintf(monitoringText, SMALL_STR_LEN, "Waiting for %02d:%02d min before switching on valve again", min, sec);
+	  
     } else {
-      strcpy(probingText, "Wating for tank to get full.");
-    }    
-  }
-
-  /* Dynamically generate the LED toggle link, based on its current state (on or off)*/
-  if(server.arg("led").toInt() == 2) 
-  {
-    Serial.println("User switching valve on...");
-    digitalWrite (ledPin, true);
-  }else if(server.arg("led").toInt() == 1) 
-  {
-    Serial.println("User switching valve off...");
-    digitalWrite (ledPin, false);
-    probing = true;
-  }
-
-  ledState = digitalRead(ledPin);
-  waterState = digitalRead(waterSensorPin);
-
-  if (ledState) {
-    strcpy(ledText, "Valve is on. <a href=\"/?led=1\">Turn it OFF!</a>");
+      strcpy(monitoringText, "Waiting for tank to get full.");
+    }	
+  }  
+  
+  valveState = digitalRead(valvePin);
+  if (valveState) {
+    strcpy(valveText, "Valve is closed.");
+	if(manual_mode)
+	{
+		strcat(valveText, " <a href=\"/?valve=1\">Open it!</a>");
+	}
   } else {
-    strcpy(ledText, "Valve is OFF. <a href=\"/?led=2\">Turn it ON!</a>");
+    strcpy(valveText, "Valve is open.");
+	if(manual_mode)
+	{
+		strcat(valveText, " <a href=\"/?valve=2\">Close it!</a>");
+	}
   }
-
-  if (waterState) {
+  
+  isTankFull = digitalRead(waterSensorPin);
+  if (isTankFull) {
     strcpy(waterText, "Tank is Full");
   } else {
     strcpy(waterText, "Tank is not Full");
   }
 
-  char html[1000];
-  int sec = millis() / 1000;
-  int min = sec / 60;
-  int hr = min / 60;
-
-  snprintf(lastFullTime, 80, "Last tank full: %02d hour, %02d min ago", waterFullMillis/(1000*60*60), (waterFullMillis/(1000*60))%60);
+  snprintf(lastFullTime, SMALL_STR_LEN, "Last tank full: %02d hour, %02d min ago", lastTankFullTimeMillis/(1000*60*60), (lastTankFullTimeMillis/(1000*60))%60);
 
 // Build an HTML page to display on the web-server root address
   snprintf ( html, 1000,
 "<html>\
   <head>\
-    <meta http-equiv='refresh' content='10'/>\
+    <meta http-equiv='refresh' content='10'; URL='"AP_URL"'/>\
     <title>ESP8266 Water Controller</title>\
     <style>\
       body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; font-size: 1.5em; Color: #000000; }\
@@ -139,14 +150,15 @@ void handleRoot() {
     <p>%s<p>\
     <p>%s<p>\
     <p>%s<p>\
-    <p>This page refreshes every 10 seconds. Click <a href=\"javascript:window.open('http://42.42.42.42','_self');\">here</a> to refresh the page now.</p>\
+	<br/>\
+    <p>This page refreshes every 10 seconds. Click <a href=\"javascript:window.open('" AP_URL "','_self');\">here</a> to refresh the page now.</p>\
   </body>\
 </html>",
-    hr, min % 60, sec % 60,
-    ledText,
-    overrideText,
+    (nowMillis/(1000*60*60)), (nowMillis/(1000*60)) % 60, (nowMillis/1000) % 60,
+    valveText,
+    manualText,
     waterText,
-    probingText,
+    monitoringText,
     lastFullTime
   );
   
@@ -186,10 +198,10 @@ void setup_wifi() {
   Serial.println(myIP);
  
   server.on ( "/", handleRoot );
-  server.on ( "/led=1", handleRoot);
-  server.on ( "/led=2", handleRoot);
-  server.on ( "/override=1", handleRoot);
-  server.on ( "/override=2", handleRoot);  
+  server.on ( "/valve=1", handleRoot);
+  server.on ( "/valve=2", handleRoot);
+  server.on ( "/manual_mode=1", handleRoot);
+  server.on ( "/manual_mode=2", handleRoot);  
   server.on ( "/inline", []() {
     server.send ( 200, "text/plain", "this works as well" );
   } );
@@ -204,7 +216,7 @@ void setup() {
   Serial.println();
   Serial.println("Configuring access point...");
 
-  pinMode ( ledPin, OUTPUT );
+  pinMode ( valvePin, OUTPUT );
   pinMode ( waterSensorPin, INPUT );
   water_controller();  
   setup_wifi();  
